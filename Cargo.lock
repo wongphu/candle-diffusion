@@ -260,6 +260,7 @@ dependencies = [
  "rand_distr",
  "serde",
  "serde_json",
+ "tempfile",
  "tokenizers",
 ]
 

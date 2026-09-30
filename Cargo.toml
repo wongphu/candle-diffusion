@@ -27,3 +27,6 @@ metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal"]
 
 [profile.release]
 debug = false
+
+[dev-dependencies]
+tempfile = "3.27.0"

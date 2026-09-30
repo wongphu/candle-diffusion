@@ -48,3 +48,13 @@ Each line is a JSON object; only `prompt` is required:
 - Lines whose image already exists are skipped, so an interrupted batch can be re-run.
   Use `--overwrite` to regenerate them.
 - If a line fails during generation, the batch continues and exits non-zero at the end.
+
+## Tests
+
+```bash
+cargo test --release                        # unit + CLI tests, no model needed (<1s)
+cargo test --release -- --ignored           # end-to-end generation with the real model
+```
+
+The ignored test generates tiny 256×256 images and checks that the same seed gives
+byte-identical output; it needs the downloaded weights.

@@ -809,3 +809,356 @@ fn save_image<P: AsRef<std::path::Path>>(img: &Tensor, p: P) -> Result<()> {
     image.save(p)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(extra: &[&str]) -> Args {
+        let mut argv = vec!["candy"];
+        argv.extend_from_slice(extra);
+        Args::try_parse_from(argv).unwrap()
+    }
+
+    fn batch_args(input: &Path, extra: &[&str]) -> Args {
+        let mut argv = vec!["--input", input.to_str().unwrap()];
+        argv.extend_from_slice(extra);
+        args(&argv)
+    }
+
+    fn write_jsonl(dir: &Path, content: &str) -> PathBuf {
+        let path = dir.join("prompts.jsonl");
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    fn job(width: usize, height: usize) -> Job {
+        Job {
+            line: 1,
+            prompt: "a cat".into(),
+            negative_prompt: String::new(),
+            width,
+            height,
+            num_steps: 9,
+            guidance_scale: 5.0,
+            seed: 0,
+            random_seed: false,
+            base_output: "out.png".into(),
+            output: "out.png".into(),
+        }
+    }
+
+    // ---------- validation ----------
+
+    #[test]
+    fn validate_accepts_multiples_of_16() {
+        for (w, h) in [(1024, 1024), (512, 512), (384, 512), (640, 368), (16, 16)] {
+            job(w, h).validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn validate_rejects_bad_dimensions_with_suggestion() {
+        let err = job(1000, 1024).validate().unwrap_err().to_string();
+        assert!(err.contains("divisible by 16"), "{err}");
+        assert!(err.contains("992x1024"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_empty_prompt_and_zero_steps() {
+        let mut j = job(512, 512);
+        j.prompt = "   ".into();
+        assert!(j
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("prompt is empty"));
+
+        let mut j = job(512, 512);
+        j.num_steps = 0;
+        assert!(j.validate().unwrap_err().to_string().contains("num_steps"));
+    }
+
+    // ---------- seeds and filenames ----------
+
+    #[test]
+    fn seeded_path_inserts_seed_before_extension() {
+        assert_eq!(
+            seeded_path(Path::new("out/a.png"), 42),
+            PathBuf::from("out/a-42.png")
+        );
+        assert_eq!(seeded_path(Path::new("a"), 7), PathBuf::from("a-7"));
+        assert_eq!(
+            seeded_path(Path::new("x.y.png"), 1),
+            PathBuf::from("x.y-1.png")
+        );
+    }
+
+    #[test]
+    fn random_seed_fits_in_u32_and_varies() {
+        let seeds: std::collections::HashSet<u64> = (0..20).map(|_| random_seed()).collect();
+        assert!(seeds.iter().all(|&s| s < u32::MAX as u64));
+        assert!(seeds.len() > 1, "20 random seeds were all equal");
+    }
+
+    #[test]
+    fn single_job_with_explicit_seed_keeps_output_name() {
+        let job = single_job(&args(&["--seed", "5", "--output", "x.png"]));
+        assert_eq!(job.seed, 5);
+        assert!(!job.random_seed);
+        assert_eq!(job.output, PathBuf::from("x.png"));
+    }
+
+    #[test]
+    fn single_job_without_seed_appends_random_seed() {
+        let job = single_job(&args(&["--output", "x.png"]));
+        assert!(job.random_seed);
+        assert_eq!(job.output, PathBuf::from(format!("x-{}.png", job.seed)));
+        assert_eq!(job.base_output, PathBuf::from("x.png"));
+    }
+
+    #[test]
+    fn single_job_uses_model_default_steps() {
+        assert_eq!(single_job(&args(&[])).num_steps, 9);
+        assert_eq!(single_job(&args(&["--num-steps", "4"])).num_steps, 4);
+    }
+
+    // ---------- noise ----------
+
+    #[test]
+    fn seeded_noise_is_reproducible() {
+        let dev = candle::Device::Cpu;
+        let shape = (1, 16, 8, 8);
+        let a = seeded_noise(1, shape, &dev)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let b = seeded_noise(1, shape, &dev)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let c = seeded_noise(2, shape, &dev)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn seeded_noise_is_standard_normal() {
+        let t = seeded_noise(3, (1, 16, 64, 64), &candle::Device::Cpu).unwrap();
+        assert_eq!(t.dims(), &[1, 16, 64, 64]);
+        let v = t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let n = v.len() as f32;
+        let mean = v.iter().sum::<f32>() / n;
+        let std = (v.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / n).sqrt();
+        assert!(mean.abs() < 0.02, "mean {mean}");
+        assert!((std - 1.0).abs() < 0.02, "std {std}");
+    }
+
+    // ---------- JSONL parsing ----------
+
+    #[test]
+    fn read_jobs_applies_cli_defaults_and_line_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = write_jsonl(
+            dir.path(),
+            r#"{"prompt": "a", "seed": 1}
+{"prompt": "b", "seed": 2, "width": 768, "height": 512, "num_steps": 4, "guidance_scale": 2.5, "negative_prompt": "blur"}
+"#,
+        );
+        let a = batch_args(
+            &input,
+            &[
+                "--width",
+                "512",
+                "--height",
+                "512",
+                "--negative-prompt",
+                "ugly",
+            ],
+        );
+        let jobs = read_jobs(&input, &a).unwrap();
+
+        assert_eq!(jobs.len(), 2);
+        let (j1, j2) = (&jobs[0], &jobs[1]);
+        assert_eq!((j1.width, j1.height, j1.num_steps), (512, 512, 9));
+        assert_eq!(j1.negative_prompt, "ugly");
+        assert_eq!(j1.guidance_scale, 5.0);
+        assert_eq!((j2.width, j2.height, j2.num_steps), (768, 512, 4));
+        assert_eq!(j2.negative_prompt, "blur");
+        assert_eq!(j2.guidance_scale, 2.5);
+    }
+
+    #[test]
+    fn read_jobs_names_outputs_by_file_line_number() {
+        let dir = tempfile::tempdir().unwrap();
+        // Blank lines are skipped but still count, so names match the file's line numbers.
+        let input = write_jsonl(
+            dir.path(),
+            "{\"prompt\": \"a\", \"seed\": 1}\n\n{\"prompt\": \"b\", \"seed\": 2, \"output\": \"sub/b.png\"}\n{\"prompt\": \"c\", \"seed\": 3}\n",
+        );
+        let jobs = read_jobs(&input, &batch_args(&input, &["--output-dir", "out"])).unwrap();
+        let outputs: Vec<_> = jobs.iter().map(|j| j.output.clone()).collect();
+        assert_eq!(
+            outputs,
+            vec![
+                PathBuf::from("out/0001.png"),
+                PathBuf::from("out/sub/b.png"),
+                PathBuf::from("out/0004.png")
+            ]
+        );
+        assert_eq!(
+            jobs.iter().map(|j| j.line).collect::<Vec<_>>(),
+            vec![1, 3, 4]
+        );
+    }
+
+    #[test]
+    fn read_jobs_seed_precedence_and_random_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = write_jsonl(
+            dir.path(),
+            "{\"prompt\": \"a\", \"seed\": 9}\n{\"prompt\": \"b\"}\n",
+        );
+
+        // Line seed wins over CLI seed; CLI seed fills in missing ones.
+        let jobs = read_jobs(&input, &batch_args(&input, &["--seed", "100"])).unwrap();
+        assert_eq!((jobs[0].seed, jobs[1].seed), (9, 100));
+        assert!(!jobs[1].random_seed);
+        assert_eq!(jobs[1].output, PathBuf::from("./0002.png"));
+
+        // No seed anywhere: random, and appended to the filename.
+        let jobs = read_jobs(&input, &batch_args(&input, &[])).unwrap();
+        assert!(jobs[1].random_seed);
+        assert_eq!(
+            jobs[1].output,
+            PathBuf::from(format!("./0002-{}.png", jobs[1].seed))
+        );
+    }
+
+    #[test]
+    fn read_jobs_reports_all_errors_with_line_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = write_jsonl(
+            dir.path(),
+            r#"{"prompt": "ok"}
+{"prompt": "bad size", "width": 1000}
+{"promt": "typo"}
+not json
+{"prompt": "dup", "output": "x.png"}
+{"prompt": "dup", "output": "x.png"}
+{"prompt": ""}
+"#,
+        );
+        let err = read_jobs(&input, &batch_args(&input, &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("5 invalid line(s)"), "{err}");
+        for expected in [
+            "line 2: Image dimensions",
+            "line 3: unknown field `promt`",
+            "line 4:",
+            "line 6: output ./x.png is also used by line 5",
+            "line 7: prompt is empty",
+        ] {
+            assert!(err.contains(expected), "missing {expected:?} in:\n{err}");
+        }
+        assert!(!err.contains("line 1:"), "{err}");
+    }
+
+    #[test]
+    fn read_jobs_rejects_duplicate_outputs_even_with_random_seeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = write_jsonl(
+            dir.path(),
+            "{\"prompt\": \"a\", \"output\": \"x.png\"}\n{\"prompt\": \"b\", \"output\": \"x.png\"}\n",
+        );
+        let err = read_jobs(&input, &batch_args(&input, &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("also used by line 1"), "{err}");
+    }
+
+    #[test]
+    fn read_jobs_rejects_empty_and_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = write_jsonl(dir.path(), "\n  \n");
+        let err = read_jobs(&input, &batch_args(&input, &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no prompts found"), "{err}");
+
+        let missing = dir.path().join("nope.jsonl");
+        let err = read_jobs(&missing, &batch_args(&missing, &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("reading"), "{err}");
+    }
+
+    // ---------- resume (existing outputs) ----------
+
+    #[test]
+    fn existing_output_with_fixed_seed_checks_exact_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.png");
+        let mut j = job(512, 512);
+        j.base_output = path.clone();
+        j.output = path.clone();
+        assert_eq!(j.existing_output(), None);
+        std::fs::write(&path, b"").unwrap();
+        assert_eq!(j.existing_output(), Some(path));
+    }
+
+    #[test]
+    fn existing_output_with_random_seed_matches_any_seed_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut j = job(512, 512);
+        j.base_output = dir.path().join("0001.png");
+        let j = j.with_seed(None);
+        assert_eq!(j.existing_output(), None);
+
+        // Files that must not count as an existing output for 0001.png.
+        for name in [
+            "0001.png",
+            "0001-.png",
+            "0001-abc.png",
+            "0001-12.jpg",
+            "00012-5.png",
+            "0002-5.png",
+        ] {
+            std::fs::write(dir.path().join(name), b"").unwrap();
+        }
+        assert_eq!(j.existing_output(), None);
+
+        let hit = dir.path().join("0001-123456.png");
+        std::fs::write(&hit, b"").unwrap();
+        assert_eq!(j.existing_output(), Some(hit));
+    }
+
+    #[test]
+    fn existing_output_handles_missing_directory() {
+        let mut j = job(512, 512);
+        j.base_output = PathBuf::from("/definitely/not/here/0001.png");
+        assert_eq!(j.with_seed(None).existing_output(), None);
+    }
+
+    // ---------- CLI ----------
+
+    #[test]
+    fn cli_rejects_conflicting_and_batch_only_flags() {
+        let parse = |a: &[&str]| Args::try_parse_from([&["candy"], a].concat());
+        assert!(parse(&["--input", "p.jsonl", "--prompt", "x"]).is_err());
+        assert!(parse(&["--input", "p.jsonl", "--output", "x.png"]).is_err());
+        assert!(parse(&["--overwrite"]).is_err());
+        assert!(parse(&["--output-dir", "out"]).is_err());
+        assert!(parse(&["-i", "p.jsonl", "--output-dir", "out", "--overwrite"]).is_ok());
+    }
+}
