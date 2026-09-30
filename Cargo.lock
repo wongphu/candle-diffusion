@@ -256,6 +256,9 @@ dependencies = [
  "clap",
  "hf-hub",
  "image",
+ "rand",
+ "rand_distr",
+ "serde",
  "serde_json",
  "tokenizers",
 ]
