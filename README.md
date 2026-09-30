@@ -59,3 +59,7 @@ cargo test --release -- --ignored           # end-to-end generation with the rea
 
 The ignored test generates tiny 256×256 images and checks that the same seed gives
 byte-identical output; it needs the downloaded weights.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Adapted from candle's `z_image` example (MIT/Apache-2.0).
