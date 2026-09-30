@@ -4,9 +4,17 @@ Text-to-image with [Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Tur
 using [candle](https://github.com/huggingface/candle) 0.11.0 on the Metal GPU.
 Adapted from candle's `z_image` example into a standalone crate.
 
+Install the `candy` command (to `~/.cargo/bin`):
+
 ```bash
-cargo run --release -- --prompt "A cute robot holding a candle" --width 1024 --height 1024 --seed 42
+cargo install --path .
 ```
+
+```bash
+candy --prompt "A cute robot holding a candle" --width 1024 --height 1024 --seed 42
+```
+
+Or without installing: `cargo run --release -- --prompt "..."`.
 
 - The first run downloads ~33 GB of weights to `~/.cache/huggingface`.
 - Width/height must be divisible by 16. Default steps: 9. Output: `z_image_output.png` (`--output` to change).
