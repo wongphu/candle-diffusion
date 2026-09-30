@@ -1,0 +1,5 @@
+{"prompt": "A cozy Japanese bookshop at night in the rain, warm light spilling onto wet cobblestones, cinematic", "width": 512, "height": 512}
+{"prompt": "Macro photo of a honeybee covered in pollen on a lavender flower, shallow depth of field", "seed": 101, "width": 512, "height": 512}
+{"prompt": "Isometric pixel art of a tiny floating island with a windmill and waterfalls", "output": "art/island.png", "width": 512, "height": 512}
+{"prompt": "Portrait of an elderly fisherman with a weathered face, dramatic side lighting, black and white film photo", "width": 384, "height": 512, "seed": 7}
+{"prompt": "A futuristic desert city at sunset with solar towers and hovering trains, ultra wide", "width": 640, "height": 368}

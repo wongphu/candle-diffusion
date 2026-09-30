@@ -31,7 +31,8 @@ Generate many images with one model load:
 candy --input prompts.jsonl --output-dir out
 ```
 
-Each line is a JSON object; only `prompt` is required:
+Each line is a JSON object; only `prompt` is required. See [`batch5.jsonl`](batch5.jsonl)
+for a full example (`candy -i batch5.jsonl --output-dir batch5`):
 
 ```json
 {"prompt": "A red fox in fresh snow", "seed": 3}
